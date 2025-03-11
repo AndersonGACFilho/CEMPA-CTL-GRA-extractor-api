@@ -1,1 +1,1 @@
-# Solu-o-de-gest-o-para-efici-ncia-energ-tica-para-as-escolas-do-futuro
+# Solução de gestão para eficiência energética para as escolas do futuro
