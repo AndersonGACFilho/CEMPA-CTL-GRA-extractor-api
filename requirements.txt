@@ -1,9 +1,0 @@
-fastapi
-apscheduler
-sqlalchemy
-dotenv
-starlette
-xgrads
-xarray
-matplotlib
-asyncpg
