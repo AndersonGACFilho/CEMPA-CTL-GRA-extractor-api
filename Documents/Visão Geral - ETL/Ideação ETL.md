@@ -45,7 +45,7 @@ graph LR
   end
 
   subgraph CONSUMO
-    E1 -- "Serve GeoJSON" --> G1["Leaflet / OL / Mapbox"];
+    E1 -- "Serve GeoJSON" --> G1["Leaflet"];
     D1 -- "Conexão SQL direta" --> G2["Grafana SQL -> Meteogramas"];
   end
 ```
