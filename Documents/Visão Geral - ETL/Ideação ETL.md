@@ -1,62 +1,62 @@
-# Pipeline ETL de Dados Meteorológicos BRAMS com PostGIS e Serviços OGC
+# Arquitetura de Dados BRAMS: Do ETL à API com PostGIS e FastAPI
 
 ## Introdução
+O Centro de Excelência em Estudos, Monitoramento e Previsões Ambientais do Cerrado (CEMPA-Cerrado) produz dados de previsão do tempo de alta precisão com o modelo **BRAMS**. No entanto, o formato técnico desses dados (GrADS) e sua apresentação como imagens estáticas limitam seu uso pelo público geral, agricultores e gestores públicos.
 
-Este documento apresenta em detalhes um **pipeline ETL** completo para processar dados de previsão do **BRAMS** (Brazilian Regional Atmospheric Modeling System), contemplando desde os arquivos brutos gerados pelo modelo até dashboards interativos na web. O objetivo é demonstrar de forma didática e prática:
+Este documento apresenta uma solução arquitetural e um **pipeline técnico** completo para resolver esse desafio, transformando os dados brutos do BRAMS em um serviço de dados interativo. A arquitetura aqui descrita abandona a abordagem tradicional de servidores GIS em favor de uma **API customizada com FastAPI**, oferecendo maior flexibilidade e controle sobre a disponibilização dos dados. O objetivo é detalhar de forma prática:
 
-1. Como converter saídas GrADS para NetCDF.
-2. Processar, visualizar e gerar produtos meteorológicos derivadas (PNG e GeoTIFF).
-3. Armazenar rasters de forma otimizada em **PostGIS**.
-4. Publicar camadas via **OGC** (WMS, WMTS) usando **GeoServer** ou **MapServer**.
-5. Configurar cache de tiles com **GeoWebCache** ou **MapCache**.
-6. Consumir as camadas em aplicações web (Leaflet, Mapbox GL JS, OpenLayers) ou/e em dashboards (Grafana).
----
+1.  Como converter as saídas GrADS (`.ctl`/`.dat`) para o formato **NetCDF**.
+2.  Como processar os dados NetCDF com **Python** para gerar produtos em **GeoTIFF**.
+3.  Como carregar e otimizar o armazenamento de dados **raster no PostGIS**.
+4.  Como desenvolver uma **API REST com FastAPI** para servir os dados dinamicamente.
+5.  Como implementar estratégias de cache (ex: Redis) para otimizar **as respostas da API**, diminuindo a carga no banco de dados.
+6.  Como **consumir os dados** em aplicações de mapa interativas e dashboards analíticos.
+
+### Requisitos Atendidos pela Arquitetura
+Esta arquitetura foi projetada para atender a um conjunto de requisitos funcionais (RF) e não funcionais (RNF) chave, documentados no `Documento de Requisitos do Sistema - CEMPA (V2).docx`.
+
+* **Visualização Interativa e Acesso aos Dados (GeoJSON via API):** A capacidade de servir os dados como GeoJSON é o núcleo da nova solução. Isso permite que o frontend tenha acesso aos valores numéricos, possibilitando uma interatividade rica e atendendo diretamente aos requisitos **[RF001] (Acessar Painel)**, **[RF005] (Personalização de Localização)**, **[RF006] (Seleção de Variáveis)** e **[RF011] (Sistema de Tooltips Explicativos)**, já que os tooltips podem agora mostrar dados precisos.
+* **Download e Manipulação de Dados:** Ao estruturar os dados em um banco relacional, a arquitetura habilita a extração customizada de informações. A API pode facilmente consultar e formatar esses dados para download, cumprindo o requisito **[RF007] (Download Personalizado de Dados)** em formatos como CSV e JSON.
+* **Performance, Acessibilidade e Responsividade:** As decisões arquiteturais suportam os principais requisitos não funcionais. A performance do **[RNF001] (Tempo de Carregamento)** é alcançada através de consultas otimizadas no PostGIS e estratégias de cache na API. O desacoplamento entre backend e frontend permite que a equipe de desenvolvimento foque em atender plenamente aos requisitos de **[RNF002] (Acessibilidade)** e **[RNF003] (Responsividade)** na camada de apresentação.
+* **Análise de Séries Temporais (Grafana):** A conexão direta do Grafana ao PostGIS, que lê as tabelas vetoriais, é uma forma eficiente de gerar gráficos de séries temporais (meteogramas), atendendo a parte do requisito **[RF013] (Legendas e Indicadores Visuais)** de forma analítica e complementar à interface principal.
 
 ## Diagrama Geral do Pipeline
-
 ```mermaid
-flowchart LR
+graph LR
   subgraph EXTRAÇÃO
-    A1[Arquivos GrADS .ctl + .dat]
-    A2[Singularity: CDO ImportBinary]
-    A1 --> A2
-    A2 --> B1[NetCDFs]
+    A1["Arquivos GrADS .ctl + .dat"] --> A2["Singularity: CDO ImportBinary"];
+    A2 --> B1["NetCDFs"];
   end
 
   subgraph TRANSFORMAÇÃO
-    B1 --> C1[VirtualEnv Python]
-    C1 --> C2[t2m_ur2m.py -> T2m & UR2m]
-    C1 --> C3[dpva.py -> DewPoint + Vento]
-    C1 --> C4[precip_horaria.py -> Precip Horária]
-    C1 --> C5[pacm.py -> Precip Acumulada]
+    B1 --> C1["VirtualEnv Python"];
+    C1 --> C2["t2m_ur2m.py -> T2m & UR2m"];
+    C1 --> C3["dpva.py -> DewPoint + Vento"];
+    C1 --> C4["precip_horaria.py -> Precip Horária"];
+    C1 --> C5["pacm.py -> Precip Acumulada"];
   end
 
   subgraph CARREGAMENTO
-    C2 & C3 & C4 & C5 --> D1[GeoTIFFs]
-    D1 --> D2[raster2pgsql -> PostGIS]
+    C2 & C3 & C4 & C5 -- "INSERTs SQL" --> D1[("PostGIS (Tabelas Vetoriais)")];
   end
 
   subgraph PUBLICAÇÃO
-    D2 --> E1[GeoServer + PGRaster]
-    E1 --> E2[GeoWebCache WMTS]
-    D2 --> F1[MapServer + GDAL]
-    F1 --> F2[MapCache WMTS]
+    D1 -- "Lê dados dos pontos (SQL)" --> E1["API com FastAPI"];
   end
 
   subgraph CONSUMO
-    E2 & F2 --> G1[Leaflet / OL / Mapbox]
-    D2 --> G2[Grafana SQL -> Meteogramas]
+    E1 -- "Serve GeoJSON" --> G1["Leaflet / OL / Mapbox"];
+    D1 -- "Conexão SQL direta" --> G2["Grafana SQL -> Meteogramas"];
   end
 ```
 
+
 **Explicação do diagrama:**
-
-* **Extração:** os arquivos brutos (`.ctl` e `.dat`) do BRAMS são convertidos em NetCDF usando o CDO dentro de um container Singularity, garantindo consistência de ambiente.
-* **Transformação:** em um ambiente Python VirtualEnv, scripts especializados calculam e geram produtos (PNG e GeoTIFF) de temperatura, umidade, vento e precipitação.
-* **Carregamento:** os GeoTIFFs resultantes são importados para o PostGIS com tiling e indexação, otimizando consultas.
-* **Publicação:** duas rotas paralelas: GeoServer com plugin PGRaster e GeoWebCache para WMS/WMTS, ou MapServer + GDAL com MapCache para WMTS.
-* **Consumo:** clientes web (Leaflet, OpenLayers, Mapbox GL) consomem tiles WMTS; Grafana conecta-se ao PostGIS para criar meteogramas por SQL.
-
+* **Extração:** os arquivos brutos (`.ctl` e `.dat`) do BRAMS são convertidos em **NetCDF** usando o CDO dentro de um container Singularity, garantindo consistência de ambiente.
+* **Transformação:** em um ambiente Python VirtualEnv, scripts especializados **extraem os valores numéricos** de cada variável para cada ponto da grade, preparando-os para a inserção no banco de dados.
+* **Carregamento:** os dados pontuais extraídos são inseridos diretamente nas **tabelas vetoriais** do PostGIS através de comandos `INSERT` SQL, populando o modelo de dados relacional.
+* **Publicação:** Uma API customizada com FastAPI se conecta ao PostGIS, lê os dados vetoriais (pontos) e os serializa no formato **GeoJSON** sob demanda.
+* **Consumo:** Clientes web (Leaflet, etc.) consomem os dados **GeoJSON** da API para renderizar camadas interativas no mapa; Grafana mantém sua conexão direta ao PostGIS para criar meteogramas.
 ---
 
 ## 1. Extração: GrADS para NetCDF
@@ -86,189 +86,136 @@ singularity exec brams-cdo.sif \
 
 ## 2. Transformação: Cálculos e Produtos Derivados
 
-Todos os scripts Python rodam em um **VirtualEnv** (Python 3.8+) que inclui `netCDF4`, `numpy`, `matplotlib`, `mpl_toolkits.basemap` e `gdal`.
-
-### 2.1 t2m\_ur2m.py (Temperatura e Umidade)
+Todos os scripts Python rodam em um **VirtualEnv** (Python 3.8+) que inclui:
+* `netCDF4`,
+* `numpy`,
+* `matplotlib`,
+* `mpl_toolkits.basemap`,
+* `gdal`,
+* `psycopg2`.
 
 ```python
-# Exemplo simplificado
+# Exemplo simplificado de extração para a variável 'temperatura a 2m'
 from netCDF4 import Dataset
 import numpy as np
-import rasterio
-from rasterio.transform import from_origin
 
-# Carrega NetCDF
+# Carrega o arquivo NetCDF
 nc = Dataset('analise.nc')
-t2m = nc.variables['t2m'][0]-273.15  # Kelvin para °C
-td = nc.variables['td2m'][0]-273.15
+lats = nc.variables['lat'][:]
+lons = nc.variables['lon'][:]
+t2m_data = nc.variables['t2m'][0] - 273.15  # Kelvin para °C
+id_variavel_t2m = 1 # Supondo que o ID da variável 't2m' no nosso DB seja 1
 
-# Fórmula Tetens
-es = 0.61078*np.exp(17.27*t2m/(t2m+237.3))
-e = 0.61078*np.exp(17.27*td/(td+237.3))
-ur = (e/es)*100
+dados_para_inserir = []
+
+# Itera sobre cada ponto da grade para criar os registros
+for lat_idx, lat in enumerate(lats):
+    for lon_idx, lon in enumerate(lons):
+        # Função hipotética que busca o ID do local no DB com base nas coordenadas
+        ponto_id = get_ponto_id_from_db(lat, lon) 
+        valor_temp = t2m_data[lat_idx, lon_idx]
+        
+        # Prepara o dado para inserção no banco
+        dados_para_inserir.append(
+            (ponto_id, id_variavel_t2m, '2025-06-18 12:00:00Z', valor_temp)
+        )
+
+# A lista 'dados_para_inserir' seria então usada para uma carga em massa no PostGIS.
 ```
-
-* Gera PNG: `plt.savefig('t2m_2025052600.png')`.
-* Gera GeoTIFF: via `rasterio` ou GDAL CLI.
-
-### 2.2 dpva.py (Dew Point + Vento)
-
-* Extrai `td2m`, `u10`, `v10` do NetCDF.
-* Plota mapas de contours de ponto de orvalho e vetores de vento.
-* Exporta `dpva_2025052600.png` e GeoTIFF.
-
-### 2.3 precip\_horaria.py (Precipitação Horária)
-
-* Lê precipitação acumulada.
-* Calcula diferenças entre tempos consecutivos.
-* Exporta `precip_h_2025052600.png` e GeoTIFF.
-
-### 2.4 pacm.py (Precipitação Acumulada)
-
-* Soma precipitação desde t0 até tN.
-* Exporta `precip_total_2025052600.png` e GeoTIFF.
-
-> **Observação:** todos os scripts gravam GeoTIFFs em `/data/geotiff/20250526/variable_timestamp.tif`.
-
 ---
 
-## 3. Carregamento no PostGIS Raster
+### **3. Carregamento no PostGIS (Vetorial)**
+O carregamento deixa de usar `raster2pgsql`. Agora, os dados são inseridos nas tabelas relacionais (`LOCAIS`, `VARIAVEIS`, `PREVISOES`) que projetamos no `Documento de Arquitetura`. Esta abordagem armazena os dados de forma estruturada, e não como imagens.
 
-### 3.1 Preparação do Banco
-
+#### **3.1. Preparação do Banco**
 ```sql
+-- Garante que a extensão PostGIS para funções geoespaciais esteja ativa
 CREATE EXTENSION IF NOT EXISTS postgis;
-CREATE EXTENSION IF NOT EXISTS postgis_raster;
+
+-- Exemplo da Tabela PREVISOES que receberá os dados
+CREATE TABLE PREVISOES (
+    id_previsao BIGSERIAL PRIMARY KEY,
+    id_local INTEGER REFERENCES LOCAIS(id_local),
+    id_variavel INTEGER REFERENCES VARIAVEIS(id_variavel),
+    data_hora_previsao TIMESTAMP WITH TIME ZONE,
+    valor REAL
+);
 ```
 
-### 3.2 Importando GeoTIFFs
-
-```bash
-for tif in /data/geotiff/20250526/*.tif; do
-  raster2pgsql \
-    -s 4326 \
-    -t 256x256 \
-    -I \
-    -C \
-    -M \
-    -F \
-    "$tif" \
-    public.rasters_meteo | \
-  psql -d meteorologia
-done
-```
-
-* Cada raster vira um record com coluna `rast` e `rid`.
-* Índice GiST e constraints garantem performance e integridade.
+#### **3.2. Importando os Dados**
+O script Python de ETL usaria uma biblioteca como `psycopg2` para executar comandos `INSERT` em massa (batch), populando a tabela `PREVISOES` de forma eficiente com os dados extraídos na etapa de transformação.
 
 ---
 
-## 4. Publicação OGC: WMS e WMTS
 
-### 4.1 GeoServer + GeoWebCache
+### **4. Publicação com API Dinâmica (FastAPI)**
 
-```mermaid
-flowchart TD
-  A[PostGIS] --> B[GeoServer PGRaster]
-  B --> C[Layer 'rasters_meteo']
-  C --> D[WMS / WMTS via GeoWebCache]
+Nesta abordagem, em vez de usar um servidor GIS completo como GeoServer, desenvolvemos uma API leve e de alta performance com FastAPI para servir os dados raster diretamente do PostGIS. Isso nos dá controle total sobre a lógica, autenticação e performance.
+
+**4.1. Arquitetura da API**
+A função da API agora é consultar as tabelas relacionais no PostGIS e serializar (converter) os resultados no formato GeoJSON, pronto para ser consumido por clientes web.
+
+**4.3. Exemplo de Endpoint (Pseudo-código)**
+
+```python
+# Exemplo de Endpoint que retorna GeoJSON
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+@app.get("/v1/previsoes/ponto", response_class=JSONResponse)
+async def get_previsao_ponto(lat: float, lon: float):
+    # 1. Conectar ao DB e encontrar o id_local mais próximo usando PostGIS
+    local_info = await find_nearest_local_from_db(lat, lon)
+    
+    # 2. Buscar todas as previsões para aquele id_local
+    previsoes = await get_forecasts_for_local_from_db(local_info['id'])
+
+    # 3. Construir a estrutura GeoJSON com os dados
+    feature = {
+        "type": "Feature",
+        "geometry": local_info['geometry'], # Formato GeoJSON Point
+        "properties": {
+            "local_id": local_info['id'],
+            "municipio": local_info['municipio'],
+            "previsoes": previsoes # Lista de {variavel, valor, data_hora}
+        }
+    }
+    
+    return {"type": "FeatureCollection", "features": [feature]}
 ```
 
-1. Instalar plugin **PostGIS Raster**.
-2. Criar *Data Store* apontando para `public.rasters_meteo`.
-3. Publicar *Layer*, configurar **SLD** com paletas.
-4. Habilitar **WMS-T** (dimensão TIME).
-5. **GeoWebCache** gera cache de tiles automaticamente.
-
-**URL WMS exemplo:**
-
-```
-https://servidor/geoserver/ows?service=WMS&version=1.3.0&request=GetMap
- &layers=public:rasters_meteo&styles=&crs=EPSG:4326
- &bbox=minx,miny,maxx,maxy&width=256&height=256&format=image/png&transparent=true
-```
-
-**URL WMTS exemplo:**
-
-```
-https://servidor/geoserver/gwc/service/wmts?
- layer=public:rasters_meteo&tilematrixset=EPSG:4326
-&Service=WMTS&Request=GetTile&Version=1.0.0
-&Format=image/png&TileMatrix={z}&TileRow={y}&TileCol={x}
-```
-
-### 4.2 MapServer + MapCache
-
-```mermaid
-flowchart TD
-  A[PostGIS] --> B[MapServer WMS]
-  B --> C[MapCache WMTS]
-```
-
-**Mapfile (rasters\_meteo):**
-
-```mapfile
-LAYER
- NAME "rasters_meteo"
- TYPE RASTER
- STATUS ON
- DATA "PG:host=db user=u dbname=meteorologia schema=public table=rasters_meteo column=rast"
- PROCESSING "NODATA=0"
- PROJECTION
-   "init=epsg:4326"
- END
-END
-```
-
-**MapCache XML:** definir source WMS (MapServer), grids (EPSG:3857), níveis de zoom e formato `image/png`.
 
 ---
+### **5. Consumo: WebMaps e Dashboards**
 
-## 5. Consumo: WebMaps e Dashboards
+Os clientes web consomem um endpoint de dados e usa camadas GeoJSON para renderizar as informações, o que permite muito mais interatividade (clicar em um ponto, mostrar pop-ups com valores, estilizar com base nos dados).
 
-### 5.1 Leaflet
 
-```js
-L.tileLayer.wms('https://servidor/geoserver/wms', {
-  layers: 'public:rasters_meteo',
-  format: 'image/png',
-  transparent: true,
-  version: '1.3.0'
-}).addTo(map);
+#### **5.1. Leaflet**
+```javascript
+// Exemplo de como buscar e exibir dados GeoJSON no mapa
+fetch('https://api.servidor.com/v1/previsoes/ponto?lat=-16.68&lon=-49.25')
+  .then(response => response.json())
+  .then(data => {
+    L.geoJSON(data, {
+      onEachFeature: function (feature, layer) {
+        // Extrai as propriedades para montar um pop-up interativo
+        const props = feature.properties;
+        let popupContent = `<b>${props.municipio}</b><br/>`;
+        
+        const temp = props.previsoes.find(p => p.variavel === 'temperatura_2m');
+        if (temp) {
+            popupContent += `Temperatura: ${temp.valor.toFixed(1)}°C`;
+        }
+        layer.bindPopup(popupContent);
+      }
+    }).addTo(map);
+  });
 ```
 
-Suporta `tiled: true` e plugins de timeline para WMS-T.
-
-### 5.2 Mapbox GL JS
-
-```js
-map.addSource('rast', {
-  type: 'raster',
-  tiles: ['https://servidor/geoserver/gwc/service/wmts?...&TileMatrix={z}&TileRow={y}&TileCol={x}'],
-  tileSize: 256
-});
-map.addLayer({ id: 'rastLayer', type: 'raster', source: 'rast' });
-```
-
-Necessita cache em EPSG:3857 para compatibilidade.
-
-### 5.3 OpenLayers
-
-```js
-new ol.layer.Tile({
-  source: new ol.source.WMTS({
-    url: 'https://servidor/geoserver/gwc/service/wmts',
-    layer: 'public:rasters_meteo',
-    matrixSet: 'EPSG:4326',
-    format: 'image/png',
-    projection: 'EPSG:4326'
-  })
-});
-```
-
-Permite animações temporais e reprojeção no cliente.
-
-### 5.4 Grafana
+### 5.2 Grafana
 
 * **Meteogramas:** usar **PostgreSQL datasource** e query:
 
@@ -289,12 +236,12 @@ Permite animações temporais e reprojeção no cliente.
 
 ```mermaid
 flowchart TD
-  Start([Start]) --> X[Watcher_req.py]
-  X --> Conv[gra2nc.bash]
-  Conv --> Proc[Scripts Python]
-  Proc --> Load[raster2pgsql]
-  Load --> Serve[Geoserver/MapServer]
-  Serve --> End([End])
+  Start([Start]) --> Watcher[Watcher_req.py]
+  Watcher --> Conv[gra2nc.bash]
+  Conv --> Proc["Scripts Python (Extração de Pontos)"]
+  Proc --> Load["Carga no PostGIS (INSERTs SQL)"]
+  Load --> API[API com FastAPI Pronta]
+  API --> End([End])
 ```
 
 * **watcher\_req.py:** monitora chegada de novos `.ctl` e dispara o pipeline.
