@@ -1,249 +1,229 @@
-# Arquitetura de Dados BRAMS: Do ETL à API com PostGIS e FastAPI
+# **Pipeline Técnico: Transformando Dados BRAMS em um Serviço Interativo com Python, PostGIS e uma Arquitetura de Serviços Dupla**
 
 ## Introdução
-O Centro de Excelência em Estudos, Monitoramento e Previsões Ambientais do Cerrado (CEMPA-Cerrado) produz dados de previsão do tempo de alta precisão com o modelo **BRAMS**. No entanto, o formato técnico desses dados (GrADS) e sua apresentação como imagens estáticas limitam seu uso pelo público geral, agricultores e gestores públicos.
 
-Este documento apresenta uma solução arquitetural e um **pipeline técnico** completo para resolver esse desafio, transformando os dados brutos do BRAMS em um serviço de dados interativo. A arquitetura aqui descrita abandona a abordagem tradicional de servidores GIS em favor de uma **API customizada com FastAPI**, oferecendo maior flexibilidade e controle sobre a disponibilização dos dados. O objetivo é detalhar de forma prática:
+O Centro de Excelência em Estudos, Monitoramento e Previsões Ambientais do Cerrado (CEMPA) produz dados de previsão do tempo de alta precisão com o modelo BRAMS. No entanto, o formato técnico desses dados (GrADS) e a apresentação como imagens estáticas limitam seu uso interativo e a integração com outras aplicações.
 
-1.  Como converter as saídas GrADS (`.ctl`/`.dat`) para o formato **NetCDF**.
-2.  Como processar os dados NetCDF com **Python** para gerar produtos em **GeoTIFF**.
-3.  Como carregar e otimizar o armazenamento de dados **raster no PostGIS**.
-4.  Como desenvolver uma **API REST com FastAPI** para servir os dados dinamicamente.
-5.  Como implementar estratégias de cache (ex: Redis) para otimizar **as respostas da API**, diminuindo a carga no banco de dados.
-6.  Como **consumir os dados** em aplicações de mapa interativas e dashboards analíticos.
+Este documento apresenta o pipeline técnico detalhado para implementar a **Arquitetura da Solução Proposta**, transformando os dados brutos do BRAMS em serviços de dados modernos, performáticos e escaláveis. A arquitetura abandona a geração de imagens estáticas em favor de uma abordagem de "Dados como Serviço" (DaaS), com dois componentes principais:
+
+1.  Uma **API REST com FastAPI** para fornecer dados pontuais e tabulares (previsões para um local, dados para gráficos, downloads em CSV).
+2.  Um **Servidor de Vector Tiles (Martin)** para visualizar a malha completa de dados no mapa de forma fluida e eficiente.
+
+Este documento detalha de forma prática:
+
+1.  Como ler os dados brutos do BRAMS (`.ctl`/`.gra`) diretamente com **Python (`xarray`)**.
+2.  Como transformar os dados da grade em um formato vetorial (`GeoDataFrame`) usando **GeoPandas**.
+3.  Como carregar esses dados de forma massiva e otimizada em um banco de dados **PostGIS**.
+4.  Como desenvolver a arquitetura de serviços dupla: a **API REST (FastAPI)** para consultas específicas e o **Servidor de Vector Tiles (Martin)** para visualização da malha.
+5.  Como implementar estratégias de otimização, como particionamento de tabelas e índices espaciais.
+6.  Como consumir os dados em aplicações de mapa interativas com **MapLibre GL JS**.
 
 ### Requisitos Atendidos pela Arquitetura
-Esta arquitetura foi projetada para atender a um conjunto de requisitos funcionais (RF) e não funcionais (RNF) chave, documentados no `Documento de Requisitos do Sistema - CEMPA (V2).docx`.
 
-* **Visualização Interativa e Acesso aos Dados (GeoJSON via API):** A capacidade de servir os dados como GeoJSON é o núcleo da nova solução. Isso permite que o frontend tenha acesso aos valores numéricos, possibilitando uma interatividade rica e atendendo diretamente aos requisitos **[RF001] (Acessar Painel)**, **[RF005] (Personalização de Localização)**, **[RF006] (Seleção de Variáveis)** e **[RF011] (Sistema de Tooltips Explicativos)**, já que os tooltips podem agora mostrar dados precisos.
-* **Download e Manipulação de Dados:** Ao estruturar os dados em um banco relacional, a arquitetura habilita a extração customizada de informações. A API pode facilmente consultar e formatar esses dados para download, cumprindo o requisito **[RF007] (Download Personalizado de Dados)** em formatos como CSV e JSON.
-* **Performance, Acessibilidade e Responsividade:** As decisões arquiteturais suportam os principais requisitos não funcionais. A performance do **[RNF001] (Tempo de Carregamento)** é alcançada através de consultas otimizadas no PostGIS e estratégias de cache na API. O desacoplamento entre backend e frontend permite que a equipe de desenvolvimento foque em atender plenamente aos requisitos de **[RNF002] (Acessibilidade)** e **[RNF003] (Responsividade)** na camada de apresentação.
-* **Análise de Séries Temporais (Grafana):** A conexão direta do Grafana ao PostGIS, que lê as tabelas vetoriais, é uma forma eficiente de gerar gráficos de séries temporais (meteogramas), atendendo a parte do requisito **[RF013] (Legendas e Indicadores Visuais)** de forma analítica e complementar à interface principal.
+Esta arquitetura foi projetada para atender aos requisitos chave do `Documento de Requisitos do Sistema - CEMPA (V2)`.
+
+*   **Visualização Interativa e Acesso aos Dados:** A combinação do Servidor de Vector Tiles para a malha e a API REST para dados pontuais (GeoJSON) é o núcleo da solução. Isso permite interatividade rica, atendendo diretamente aos requisitos **[RF001] (Acessar Painel)**, **[RF005] (Personalização de Localização)**, **[RF006] (Seleção de Variáveis)** e **[RF010] (Sistema de Tooltips Explicativos)**.
+*   **Download e Manipulação de Dados:** Com os dados estruturados em um banco relacional, a API REST pode facilmente consultar e formatar dados para download, cumprindo o requisito **[RF007] (Download Personalizado de Dados)** em formatos como CSV e JSON, e **[RF008]** (Geração de Relatórios em PDF).
+*   **Performance, Acessibilidade e Responsividade:** As decisões arquiteturais suportam os requisitos não funcionais. A performance do **[RNF001] (Tempo de Carregamento)** e **[RNF004] (Performance Visual)** é alcançada por três pilares: backend otimizado (PostGIS + Martin), entrega de dados otimizada (Vector Tiles) e renderização acelerada por GPU (MapLibre GL JS). O desacoplamento permite que a equipe de frontend atenda aos requisitos de **[RNF002] (Acessibilidade)**, **[RNF003] (Responsividade)** e **[RNF010] (Compatibilidade Mobile)**.
+*   **Consistência e Usabilidade:** A arquitetura modular suporta um Design System unificado, atendendo **[RNF005] (Consistência Visual)** e **[RNF009] (Interface Intuitiva)**. As preferências do usuário podem ser salvas, conforme **[RNF007] (Persistência de Preferências)**.
 
 ## Diagrama Geral do Pipeline
 ```mermaid
 graph LR
-  subgraph EXTRAÇÃO
-    A1["Arquivos GrADS .ctl + .dat"] --> A2["Singularity: CDO ImportBinary"];
-    A2 --> B1["NetCDFs"];
+  subgraph "INGESTÃO DE DADOS (ETL EM PYTHON)"
+    A1["Arquivos BRAMS .ctl + .gra"] --> B1["Script Python"];
+    subgraph B1
+        direction LR
+        B2["xarray: Lê dados<br>multidimensionais"] --> B3["GeoPandas: Transforma<br>grade em pontos<br>(GeoDataFrame)"];
+    end
   end
 
-  subgraph TRANSFORMAÇÃO
-    B1 --> C1["VirtualEnv Python"];
-    C1 --> C2["t2m_ur2m.py -> T2m & UR2m"];
-    C1 --> C3["dpva.py -> DewPoint + Vento"];
-    C1 --> C4["precip_horaria.py -> Precip Horária"];
-    C1 --> C5["pacm.py -> Precip Acumulada"];
+  subgraph "ARMAZENAMENTO (POSTGIS)"
+    B3 --> C1["Bulk Load (COPY)"];
+    C1 --> C2["Tabela PREVISOES_STAGING"];
+    C2 --> C3["Troca Atômica"];
+    C3 --> D1[("Tabela de Produção<br>PREVISOES")];
   end
 
-  subgraph CARREGAMENTO
-    C2 & C3 & C4 & C5 -- "INSERTs SQL" --> D1[("PostGIS (Tabelas Vetoriais)")];
+  subgraph "PUBLICAÇÃO (SERVIÇOS DE BACKEND)"
+    D1 -- "Gera Tiles dinamicamente" --> E1["Servidor de Vector Tiles<br>(Martin)"];
+    D1 -- "Consulta SQL para pontos" --> E2["API REST (FastAPI)"];
   end
 
-  subgraph PUBLICAÇÃO
-    D1 -- "Lê dados dos pontos (SQL)" --> E1["API com FastAPI"];
-  end
-
-  subgraph CONSUMO
-    E1 -- "Serve GeoJSON" --> G1["Leaflet"];
-    D1 -- "Conexão SQL direta" --> G2["Grafana SQL -> Meteogramas"];
+  subgraph "CONSUMO (FRONTEND)"
+    E1 -- "Serve Vector Tiles (.mvt)" --> G1["Cliente de Mapa<br>(MapLibre GL JS)<br>Renderiza a malha<br>completa"];
+    E2 -- "Serve GeoJSON / JSON" --> G2["Gráficos, Tooltips<br>e Downloads"];
+    G1 --> G2
   end
 ```
 
-
-**Explicação do diagrama:**
-* **Extração:** os arquivos brutos (`.ctl` e `.dat`) do BRAMS são convertidos em **NetCDF** usando o CDO dentro de um container Singularity, garantindo consistência de ambiente.
-* **Transformação:** em um ambiente Python VirtualEnv, scripts especializados **extraem os valores numéricos** de cada variável para cada ponto da grade, preparando-os para a inserção no banco de dados.
-* **Carregamento:** os dados pontuais extraídos são inseridos diretamente nas **tabelas vetoriais** do PostGIS através de comandos `INSERT` SQL, populando o modelo de dados relacional.
-* **Publicação:** Uma API customizada com FastAPI se conecta ao PostGIS, lê os dados vetoriais (pontos) e os serializa no formato **GeoJSON** sob demanda.
-* **Consumo:** Clientes web (Leaflet, etc.) consomem os dados **GeoJSON** da API para renderizar camadas interativas no mapa; Grafana mantém sua conexão direta ao PostGIS para criar meteogramas.
----
-
-## 1. Extração: GrADS para NetCDF
-
-### 1.1 Arquivos de Origem
-
-* **.ctl:** metadados do GrADS informando dimensões (lon, lat, tempo), variáveis e formato binário.
-* **.dat/.bin:** dados brutos do modelo.
-
-### 1.2 Conversão com CDO
-
-**Container Singularity:** as dependências do CDO são encapsuladas em um container para reprodutibilidade.
-
-```bash
-singularity exec brams-cdo.sif \
-  cdo -f nc import_binary \
-    /data/brams_run/analise.ctl \
-    /data/netcdf/2025052600/analise.nc
-```
-
-* `brams-cdo.sif`: imagem Singularity com CDO instalado.
-* Gera `analise.nc` contendo todas as variáveis e tempos.
-
-> **Dica:** use `cdo sinfo analise.nc` para listar variáveis e dimensões.
-
----
-
-## 2. Transformação: Cálculos e Produtos Derivados
-
-Todos os scripts Python rodam em um **VirtualEnv** (Python 3.8+) que inclui:
-* `netCDF4`,
-* `numpy`,
-* `matplotlib`,
-* `mpl_toolkits.basemap`,
-* `gdal`,
-* `psycopg2`.
+## 1. Extração e Transformação com Python
+O pipeline usa Python para ir diretamente da fonte ao formato vetorial desejado. O ambiente Python deve incluir `xarray`, `pandas`, `geopandas`, e `sqlalchemy`/`psycopg2`.
 
 ```python
-# Exemplo simplificado de extração para a variável 'temperatura a 2m'
-from netCDF4 import Dataset
-import numpy as np
+# Exemplo simplificado de extração e transformação
+import xarray as xr
+import geopandas as gpd
+import pandas as pd
 
-# Carrega o arquivo NetCDF
-nc = Dataset('analise.nc')
-lats = nc.variables['lat'][:]
-lons = nc.variables['lon'][:]
-t2m_data = nc.variables['t2m'][0] - 273.15  # Kelvin para °C
-id_variavel_t2m = 1 # Supondo que o ID da variável 't2m' no nosso DB seja 1
+# 1. Extração com xarray
+ds = xr.open_dataset('analise.ctl', engine='gradsc')
 
-dados_para_inserir = []
+# Seleciona a variável e o tempo desejado
+temp_data = ds['t2m'].isel(time=0).values - 273.15 # Kelvin para Celsius
+lats = ds['lat'].values
+lons = ds['lon'].values
 
-# Itera sobre cada ponto da grade para criar os registros
-for lat_idx, lat in enumerate(lats):
-    for lon_idx, lon in enumerate(lons):
-        # Função hipotética que busca o ID do local no DB com base nas coordenadas
-        ponto_id = get_ponto_id_from_db(lat, lon) 
-        valor_temp = t2m_data[lat_idx, lon_idx]
-        
-        # Prepara o dado para inserção no banco
-        dados_para_inserir.append(
-            (ponto_id, id_variavel_t2m, '2025-06-18 12:00:00Z', valor_temp)
-        )
+# 2. Transformação com Pandas e GeoPandas
+df = pd.DataFrame(temp_data, index=lats, columns=lons)
+df = df.stack().reset_index()
+df.columns = ['latitude', 'longitude', 'temperatura']
 
-# A lista 'dados_para_inserir' seria então usada para uma carga em massa no PostGIS.
+gdf = gpd.GeoDataFrame(
+    df,
+    geometry=gpd.points_from_xy(df.longitude, df.latitude),
+    crs="EPSG:4326"
+)
 ```
----
 
-### **3. Carregamento no PostGIS (Vetorial)**
-O carregamento deixa de usar `raster2pgsql`. Agora, os dados são inseridos nas tabelas relacionais (`LOCAIS`, `VARIAVEIS`, `PREVISOES`) que projetamos no `Documento de Arquitetura`. Esta abordagem armazena os dados de forma estruturada, e não como imagens.
+### **2. Carregamento no PostGIS (Vetorial)**
+Os dados são carregados de forma estruturada nas tabelas relacionais (`LOCAIS`, `VARIAVEIS`, `PREVISOES`).
 
-#### **3.1. Preparação do Banco**
+#### **2.1. Preparação das Tabelas**
 ```sql
--- Garante que a extensão PostGIS para funções geoespaciais esteja ativa
 CREATE EXTENSION IF NOT EXISTS postgis;
 
--- Exemplo da Tabela PREVISOES que receberá os dados
 CREATE TABLE PREVISOES (
     id_previsao BIGSERIAL PRIMARY KEY,
     id_local INTEGER REFERENCES LOCAIS(id_local),
     id_variavel INTEGER REFERENCES VARIAVEIS(id_variavel),
-    data_hora_previsao TIMESTAMP WITH TIME ZONE,
+    data_hora_previsao TIMESTAMP WITH TIME ZONE NOT NULL,
     valor REAL
 );
+
+CREATE INDEX idx_previsoes_query ON PREVISOES (id_variavel, data_hora_previsao);
 ```
 
-#### **3.2. Importando os Dados**
-O script Python de ETL usaria uma biblioteca como `psycopg2` para executar comandos `INSERT` em massa (batch), populando a tabela `PREVISOES` de forma eficiente com os dados extraídos na etapa de transformação.
+#### **2.2. Carga em Massa (Bulk Loading)**
+O script ETL usa métodos como `to_postgis` do GeoPandas ou `copy_expert` do `psycopg2` para uma carga em massa rápida em uma tabela de *staging*, seguida de uma transação atômica para a tabela de produção.
 
----
+### **3. Publicação: A Arquitetura de Serviços Dupla**
 
-
-### **4. Publicação com API Dinâmica (FastAPI)**
-
-Nesta abordagem, em vez de usar um servidor GIS completo como GeoServer, desenvolvemos uma API leve e de alta performance com FastAPI para servir os dados raster diretamente do PostGIS. Isso nos dá controle total sobre a lógica, autenticação e performance.
-
-**4.1. Arquitetura da API**
-A função da API agora é consultar as tabelas relacionais no PostGIS e serializar (converter) os resultados no formato GeoJSON, pronto para ser consumido por clientes web.
-
-**4.3. Exemplo de Endpoint (Pseudo-código)**
+#### **3.1. API REST com FastAPI (Para Dados Pontuais)**
+Serve para consultas que não envolvem a renderização da malha inteira (séries temporais, downloads).
 
 ```python
-# Exemplo de Endpoint que retorna GeoJSON
+# api.py (Exemplo de Endpoint)
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from database import get_forecasts_for_location # Função que consulta o DB
 
 app = FastAPI()
 
-@app.get("/v1/previsoes/ponto", response_class=JSONResponse)
+@app.get("/api/v1/previsoes/ponto")
 async def get_previsao_ponto(lat: float, lon: float):
-    # 1. Conectar ao DB e encontrar o id_local mais próximo usando PostGIS
-    local_info = await find_nearest_local_from_db(lat, lon)
-    
-    # 2. Buscar todas as previsões para aquele id_local
-    previsoes = await get_forecasts_for_local_from_db(local_info['id'])
-
-    # 3. Construir a estrutura GeoJSON com os dados
-    feature = {
-        "type": "Feature",
-        "geometry": local_info['geometry'], # Formato GeoJSON Point
-        "properties": {
-            "local_id": local_info['id'],
-            "municipio": local_info['municipio'],
-            "previsoes": previsoes # Lista de {variavel, valor, data_hora}
-        }
-    }
-    
-    return {"type": "FeatureCollection", "features": [feature]}
+    feature_collection = await get_forecasts_for_location(lat, lon)
+    return feature_collection
 ```
 
+#### **3.2. Servidor de Vector Tiles com Martin (Para a Malha)**
+Serviço de alta performance para a visualização do mapa, servindo a grade no formato **MVT (.pbf)**.
+*   **Endpoint Conceitual:** `GET /tiles/variaveis/{z}/{x}/{y}?variavel=temperatura_2m&timestamp=...`
 
----
-### **5. Consumo: WebMaps e Dashboards**
+### **4. Consumo: Web Map com MapLibre GL JS**
+O cliente web usa **MapLibre GL JS** por sua performance otimizada na renderização de Vector Tiles.
 
-Os clientes web consomem um endpoint de dados e usa camadas GeoJSON para renderizar as informações, o que permite muito mais interatividade (clicar em um ponto, mostrar pop-ups com valores, estilizar com base nos dados).
-
-
-#### **5.1. Leaflet**
 ```javascript
-// Exemplo de como buscar e exibir dados GeoJSON no mapa
-fetch('https://api.servidor.com/v1/previsoes/ponto?lat=-16.68&lon=-49.25')
-  .then(response => response.json())
-  .then(data => {
-    L.geoJSON(data, {
-      onEachFeature: function (feature, layer) {
-        // Extrai as propriedades para montar um pop-up interativo
-        const props = feature.properties;
-        let popupContent = `<b>${props.municipio}</b><br/>`;
-        
-        const temp = props.previsoes.find(p => p.variavel === 'temperatura_2m');
-        if (temp) {
-            popupContent += `Temperatura: ${temp.valor.toFixed(1)}°C`;
-        }
-        layer.bindPopup(popupContent);
-      }
-    }).addTo(map);
-  });
+const map = new maplibregl.Map({ /* ... configurações ... */ });
+
+map.on('load', () => {
+    map.addSource('cempa-tiles', {
+        type: 'vector',
+        tiles: ['http://localhost:3000/tiles/variaveis/{z}/{x}/{y}?variavel=temperatura_2m&timestamp=...']
+    });
+    map.addLayer({
+        'id': 'temperatura-layer',
+        'type': 'circle',
+        'source': 'cempa-tiles',
+        'source-layer': 'public.previsoes',
+        'paint': { /* ... estilo dinâmico ... */ }
+    });
+});
+
+map.on('click', 'temperatura-layer', (e) => {
+    const coords = e.lngLat;
+    fetch(`/api/v1/previsoes/ponto?lat=${coords.lat}&lon=${coords.lon}`)
+      .then(res => res.json())
+      .then(data => { /* ... exibe popup com dados da API ... */ });
+});
 ```
 
-### 5.2 Grafana
+### **5. Grafana**
+Para gerar meteogramas, o Grafana pode se conectar à fonte de dados **PostgreSQL** e executar uma query para buscar a série temporal de um ponto.
+```sql
+-- Query para buscar a série temporal de temperatura para o local mais próximo
+-- de uma dada latitude e longitude.
+SELECT
+  p.data_hora_previsao AS "time",
+  p.valor
+FROM PREVISOES p
+JOIN (
+  -- Subquery para encontrar o ID do local mais próximo
+  SELECT id_local
+  FROM LOCAIS
+  ORDER BY geometria <-> ST_SetSRID(ST_MakePoint(-49.25, -16.68), 4326)
+  LIMIT 1
+) AS local_proximo ON p.id_local = local_proximo.id_local
+WHERE
+  p.id_variavel = (SELECT id_variavel FROM VARIAVEIS WHERE nome_variavel = 'temperatura_2m') AND
+  $__timeFilter(p.data_hora_previsao)
+ORDER BY 1;
+```
 
-* **Meteogramas:** usar **PostgreSQL datasource** e query:
-
-  ```sql
-  SELECT timestamp,
-    ST_Value(rast, 1,
-      ST_SetSRID(ST_MakePoint(lon,lat),4326)
-    ) AS valor
-  FROM rasters_meteo
-  WHERE ST_Intersects(rast, ST_SetSRID(ST_MakePoint(lon,lat),4326))
-  ORDER BY timestamp;
-  ```
-* **Mapas raster:** plugin **Geomap WMS** para consumir WMS/WMTS.
-
----
-
-## 6. Orquestração e Automação
-
+### **6. Orquestração e Automação**
 ```mermaid
 flowchart TD
-  Start([Start]) --> Watcher[Watcher_req.py]
-  Watcher --> Conv[gra2nc.bash]
-  Conv --> Proc["Scripts Python (Extração de Pontos)"]
-  Proc --> Load["Carga no PostGIS (INSERTs SQL)"]
-  Load --> API[API com FastAPI Pronta]
-  API --> End([End])
+  Start([Disparo]) --> Watcher["Watcher ou Cron"]
+  Watcher --> ETL["Script Python (ETL)"]
+  ETL --> DBLoad["Transação SQL no PostGIS"]
+  DBLoad --> Ready(["Serviços Prontos"])
 ```
+*   **Disparo:** Um `watcher` monitora a chegada de novos arquivos ou um agendador (`cron`, `Airflow`) dispara o processo.
+*   **Orquestração:** **Apache Airflow** é a ferramenta recomendada para controle robusto, com retentativas e logs.
 
-* **watcher\_req.py:** monitora chegada de novos `.ctl` e dispara o pipeline.
-* **Airflow:** DAGs com `BashOperator` e `PostgresOperator` para controle e retries.
-* **Cron:** fallback para agendamento simples em horários fixos.
+---
+
+## 7. Referências
+
+### Documentos e Artefatos do Projeto
+*   **Documento de Requisitos do Sistema - CEMPA (V2):** Documento que estabelece os requisitos funcionais e não-funcionais que guiaram o design desta arquitetura. [Documento](https://docs.google.com/document/d/151t7KkEFybwVDs5brnXSM7g822uNCJW4lfQ-kC9Y6ss/edit?usp=sharing)
+*   **Documento de Arquitetura da Solução Proposta:** Documento que detalha uma arquitetura de sistema moderna e de alta performance, projetada para a nova plataforma de visualização de dados meteorológicos do CEMPA/UFG. [Documento](https://docs.google.com/document/d/1NXOI43N8yXk8bXJwnwMWZRJmKD6zhAOC/edit?usp=sharing&ouid=115475883847434972692&rtpof=true&sd=true)
+
+### Linguagens e Ecossistemas
+*   **Python:** Linguagem de programação principal utilizada para o desenvolvimento do pipeline de ETL e da API REST. https://www.python.org
+*   **Rust:** Linguagem de programação de sistemas na qual o servidor de tiles Martin é desenvolvido, conhecida por sua performance e segurança. https://www.rust-lang.org
+
+### Pipeline de Dados (ETL)
+*   **xarray:** Biblioteca Python fundamental para a leitura e manipulação de dados científicos multidimensionais. https://xarray.pydata.org
+*   **GeoPandas:** Extensão do Pandas que facilita a manipulação de dados geoespaciais em Python. https://geopandas.org
+*   **Dask:** Biblioteca de computação paralela em Python, sugerida para acelerar a etapa de transformação. https://dask.org
+*   **SQLAlchemy:** Toolkit SQL e Mapeador Objeto-Relacional (ORM) para Python, para interação com o banco de dados. https://www.sqlalchemy.org
+
+### Banco de Dados e Armazenamento
+*   **PostgreSQL:** Sistema de Gerenciamento de Banco de Dados relacional de código aberto, escolhido como base para o Data Warehouse. https://www.postgresql.org
+*   **PostGIS:** Extensão geoespacial para o PostgreSQL, que adiciona suporte a objetos geográficos e funções espaciais. https://postgis.net
+
+### Serviços e APIs (Backend)
+*   **FastAPI:** Framework web moderno e de alta performance para a construção da API REST em Python. https://fastapi.tiangolo.com
+*   **Martin:** Servidor de Vector Tiles de código aberto e alta performance, responsável por servir a malha de dados diretamente do PostGIS. https://github.com/maplibre/martin
+*   **Mapbox Vector Tile (MVT):** Padrão aberto para codificação de dados geoespaciais vetoriais em tiles. https://github.com/mapbox/vector-tile-spec
+*   **GeoJSON:** Formato padrão aberto para codificação de dados geográficos, utilizado nas respostas da API REST. https://geojson.org
+
+### Apresentação (Frontend)
+*   **MapLibre GL JS:** Biblioteca JavaScript de código aberto para renderização de mapas interativos a partir de Vector Tiles. https://maplibre.org/maplibre-gl-js/docs/
+*   **React:** Biblioteca JavaScript sugerida para a construção da interface do usuário (Single-Page Application). https://react.dev
+*   **Vue.js:** Framework JavaScript progressivo, apresentado como alternativa ao React. https://vuejs.org
+*   **Chart.js / D3.js:** Bibliotecas JavaScript para a criação de gráficos dinâmicos. https://www.chartjs.org e https://d3js.org
+
+### Implantação e Infraestrutura (DevOps)
+*   **Docker:** Plataforma de conteinerização utilizada para empacotar e isolar os diferentes serviços da aplicação. https://www.docker.com
+*   **Nginx:** Servidor web e proxy reverso de alta performance, utilizado como Gateway de entrada para a aplicação. https://www.nginx.com
